@@ -12,16 +12,21 @@ const AccountsPayableSystem = () => {
   });
   const [showForm, setShowForm] = useState(false);
   const [view, setView] = useState('dashboard');
-  const [formData, setFormData] = useState({
-    description: '',
-    group: '',
-    account: '',
-    supplier: '',
-    dueDate: '',
-    amount: '',
-    bank: '',
-    obs: ''
-  });
+ const [formData, setFormData] = useState({
+  description: '',
+  group: '',
+  account: '',
+  personSupplier: '',
+  dueDate: '',
+  amount: '',
+  paymentMethod: '',
+  bank: '',
+  obs: '',
+  expenseType: 'fixa',
+  recurring: 'nao'
+});
+
+
 
   const categories = {
     'PESSOAL': ['Vale Transporte', 'Salários e encargos', 'Bolsa Auxílio', 'Pro Labore', 'PLR'],
@@ -35,37 +40,42 @@ const AccountsPayableSystem = () => {
     loadData();
   }, []);
 
-  const loadData = async () => {
-    try {
-      const result = await window.storage.get('accounts-payable-data');
-      if (result && result.value) {
-        setAccounts(JSON.parse(result.value));
-      }
-    } catch (error) {
-      console.log('Nenhum dado salvo ainda');
-    }
-  };
+  const STORAGE_KEY = 'accounts-payable-data';
 
-  const saveData = async (data) => {
-    try {
-      await window.storage.set('accounts-payable-data', JSON.stringify(data));
-    } catch (error) {
-      console.error('Erro ao salvar:', error);
-    }
-  };
+const loadData = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) setAccounts(JSON.parse(raw));
+  } catch (error) {
+    console.log('Nenhum dado salvo ainda');
+  }
+};
+
+const saveData = (data) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (error) {
+    console.error('Erro ao salvar:', error);
+  }
+};
+
 
   const resetForm = () => {
-    setFormData({
-      description: '',
-      group: '',
-      account: '',
-      supplier: '',
-      dueDate: '',
-      amount: '',
-      bank: '',
-      obs: ''
-    });
-  };
+  setFormData({
+    description: '',
+    group: '',
+    account: '',
+    personSupplier: '',
+    dueDate: '',
+    amount: '',
+    paymentMethod: '',
+    bank: '',
+    obs: '',
+    expenseType: 'fixa',
+    recurring: 'nao'
+  });
+};
+
 
   const handleSubmit = () => {
     if (!formData.description || !formData.group || !formData.dueDate || !formData.amount) {
@@ -73,12 +83,14 @@ const AccountsPayableSystem = () => {
       return;
     }
 
-    const newAccount = {
-      ...formData,
-      id: Date.now(),
-      amount: parseFloat(formData.amount),
-      status: 'pending'
-    };
+   const newAccount = {
+  ...formData,
+  id: Date.now(),
+  amount: parseFloat(formData.amount),
+  createdAt: new Date().toISOString(),
+  paymentDate: ''
+};
+
 
     const newAccounts = [...accounts, newAccount];
     setAccounts(newAccounts);
@@ -95,13 +107,14 @@ const AccountsPayableSystem = () => {
     }
   };
 
-  const markAsPaid = (id, paymentDate, bank) => {
-    const newAccounts = accounts.map(acc => 
-      acc.id === id ? { ...acc, status: 'paid', paymentDate, bank } : acc
-    );
-    setAccounts(newAccounts);
-    saveData(newAccounts);
-  };
+ const markAsPaid = (id, paymentDate, bank) => {
+  const newAccounts = accounts.map(acc =>
+    acc.id === id ? { ...acc, paymentDate, bank } : acc
+  );
+  setAccounts(newAccounts);
+  saveData(newAccounts);
+};
+
 
   const exportData = () => {
     const dataStr = JSON.stringify(accounts, null, 2);
@@ -285,13 +298,20 @@ const AccountsPayableSystem = () => {
   };
 
   const getAccountStatus = (account) => {
-    if (account.status === 'paid') return 'paid';
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const dueDate = new Date(account.dueDate);
-    dueDate.setHours(0, 0, 0, 0);
-    return dueDate < today ? 'overdue' : 'pending';
-  };
+  // Pago: tem data de pagamento
+  if (account.paymentDate && String(account.paymentDate).trim() !== '') {
+    return 'paid';
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const dueDate = new Date(account.dueDate);
+  dueDate.setHours(0, 0, 0, 0);
+
+  return dueDate < today ? 'overdue' : 'pending';
+};
+
 
   const calculateTotals = () => {
     const filtered = getFilteredAccounts();
@@ -747,18 +767,18 @@ const AccountsPayableSystem = () => {
                     placeholder="Código da conta"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Fornecedor
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.supplier}
-                    onChange={(e) => setFormData({ ...formData, supplier: e.target.value })}
-                    className="w-full border rounded-lg px-4 py-2"
-                    placeholder="Nome do fornecedor"
-                  />
-                </div>
+               <div>
+  <label className="block text-sm font-medium text-gray-700 mb-2">
+    Pessoa / Fornecedor
+  </label>
+  <input
+    type="text"
+    value={formData.personSupplier}
+    onChange={(e) => setFormData({ ...formData, personSupplier: e.target.value })}
+    className="w-full border rounded-lg px-4 py-2"
+    placeholder="Ex: Fernanda, Fornecedor X, Aluguel"
+  />
+</div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Vencimento *
@@ -783,6 +803,34 @@ const AccountsPayableSystem = () => {
                     placeholder="0.00"
                   />
                 </div>
+		<div>
+  <label className="block text-sm font-medium text-gray-700 mb-2">
+    Tipo de despesa
+  </label>
+  <select
+    value={formData.expenseType}
+    onChange={(e) => setFormData({ ...formData, expenseType: e.target.value })}
+    className="w-full border rounded-lg px-4 py-2"
+  >
+    <option value="fixa">Fixa</option>
+    <option value="variavel">Variável</option>
+  </select>
+</div>
+
+<div>
+  <label className="block text-sm font-medium text-gray-700 mb-2">
+    Recorrente
+  </label>
+  <select
+    value={formData.recurring}
+    onChange={(e) => setFormData({ ...formData, recurring: e.target.value })}
+    className="w-full border rounded-lg px-4 py-2"
+  >
+    <option value="nao">Não</option>
+    <option value="sim">Sim</option>
+  </select>
+</div>
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Banco
@@ -797,6 +845,36 @@ const AccountsPayableSystem = () => {
                 </div>
                 <div className="col-span-2">
                   <label className="block text-sm font-medium text-gray-700 mb-2">
+		<div>
+  <label className="block text-sm font-medium text-gray-700 mb-2">
+    Forma de pagamento
+  </label>
+  <select
+    value={formData.paymentMethod}
+    onChange={(e) => setFormData({ ...formData, paymentMethod: e.target.value })}
+    className="w-full border rounded-lg px-4 py-2"
+  >
+    <option value="">Selecione...</option>
+    <option value="PIX">PIX</option>
+    <option value="Boleto">Boleto</option>
+    <option value="Transferência">Transferência</option>
+    <option value="Cartão">Cartão</option>
+    <option value="Dinheiro">Dinheiro</option>
+  </select>
+</div>
+
+<div className="col-span-2">
+  <label className="block text-sm font-medium text-gray-700 mb-2">
+    Observações
+  </label>
+  <textarea
+    value={formData.obs}
+    onChange={(e) => setFormData({ ...formData, obs: e.target.value })}
+    rows="3"
+    className="w-full border rounded-lg px-4 py-2"
+    placeholder="Informações adicionais..."
+  ></textarea>
+</div>
                     Observações
                   </label>
                   <textarea
