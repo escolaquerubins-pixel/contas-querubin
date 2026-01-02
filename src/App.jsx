@@ -42,9 +42,6 @@ const COMPANY_CNPJ = "CNPJ: 05.210.023/0001/44";
 const SUPABASE_ACCOUNTS_TABLE = "accounts_payable";
 const SUPABASE_DRE_TABLE = "dre_configs";
 const SUPABASE_DRE_ID = 1;
-const LEGACY_STORAGE_KEY = "accounts-payable-data";
-const LEGACY_DRE_STORAGE_KEY = "cq-dre-config";
-const LEGACY_SCHEMA_VERSION_KEY = "cq-schema-version";
 
 /**
  * =========================
@@ -277,29 +274,6 @@ function mapDbToAccount(row) {
   };
 }
 
-function readLegacyAccounts() {
-  try {
-    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return migrateAccountsIfNeeded(parsed);
-  } catch (e) {
-    console.error("Erro ao ler contas locais:", e);
-    return [];
-  }
-}
-
-function readLegacyDreConfig() {
-  try {
-    const raw = localStorage.getItem(LEGACY_DRE_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (e) {
-    console.error("Erro ao ler DRE local:", e);
-    return null;
-  }
-}
 
 export default function AccountsPayableSystem() {
   const confirmAction = (msg) => window.confirm(msg);
@@ -334,6 +308,11 @@ export default function AccountsPayableSystem() {
   const [isAuthed, setIsAuthed] = useState(false);
   const [loginUser, setLoginUser] = useState("");
   const [loginPass, setLoginPass] = useState("");
+  const [authView, setAuthView] = useState("login"); // login | reset-request | reset-update
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetPass, setResetPass] = useState("");
+  const [resetPassConfirm, setResetPassConfirm] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -350,13 +329,17 @@ export default function AccountsPayableSystem() {
 
     void initAuth();
 
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: subscription } = supabase.auth.onAuthStateChange((event, session) => {
       setIsAuthed(Boolean(session));
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthView("reset-update");
+        setAuthMessage("Defina sua nova senha.");
+      }
     });
 
     return () => {
       mounted = false;
-      subscription?.subscription?.unsubscribe();
+      subscription?.unsubscribe();
     };
   }, []);
 
@@ -374,6 +357,44 @@ export default function AccountsPayableSystem() {
       return;
     }
     setLoginPass("");
+    setAuthMessage("");
+  };
+
+  const requestPasswordReset = async () => {
+    const email = resetEmail.trim();
+    if (!email) {
+      alert("Informe o e-mail para recuperar a senha.");
+      return;
+    }
+
+    const redirectTo = window.location.origin;
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) {
+      alert("Não foi possível enviar o e-mail de recuperação.");
+      return;
+    }
+    setAuthMessage("Enviamos um link para redefinir sua senha.");
+  };
+
+  const updatePassword = async () => {
+    if (!resetPass || resetPass.length < 6) {
+      alert("A senha deve ter pelo menos 6 caracteres.");
+      return;
+    }
+    if (resetPass !== resetPassConfirm) {
+      alert("As senhas não conferem.");
+      return;
+    }
+
+    const { error } = await supabase.auth.updateUser({ password: resetPass });
+    if (error) {
+      alert("Não foi possível atualizar a senha.");
+      return;
+    }
+    setAuthMessage("Senha atualizada. Faça login.");
+    setAuthView("login");
+    setResetPass("");
+    setResetPassConfirm("");
   };
 
   const doLogout = async () => {
@@ -405,16 +426,13 @@ export default function AccountsPayableSystem() {
         return;
       }
 
-      const legacyConfig = readLegacyDreConfig();
-      const nextConfig = legacyConfig ? mergeDre(DEFAULT_DRE, legacyConfig) : deepClone(DEFAULT_DRE);
-
+      const nextConfig = deepClone(DEFAULT_DRE);
       const { error: upsertError } = await supabase
         .from(SUPABASE_DRE_TABLE)
         .upsert({ id: SUPABASE_DRE_ID, config: nextConfig, updated_at: new Date().toISOString() });
 
       if (upsertError) throw upsertError;
 
-      localStorage.removeItem(LEGACY_DRE_STORAGE_KEY);
       setDreConfig(nextConfig);
     } catch (e) {
       console.error("Erro ao carregar DRE:", e);
@@ -453,21 +471,6 @@ export default function AccountsPayableSystem() {
 
       if (data && data.length > 0) {
         setAccounts(data.map(mapDbToAccount));
-        return;
-      }
-
-      const legacyAccounts = readLegacyAccounts();
-      if (legacyAccounts.length > 0) {
-        const payload = legacyAccounts.map((acc) => mapAccountToDb(acc));
-        const { error: upsertError } = await supabase
-          .from(SUPABASE_ACCOUNTS_TABLE)
-          .upsert(payload, { onConflict: "id" });
-
-        if (upsertError) throw upsertError;
-
-        localStorage.removeItem(LEGACY_STORAGE_KEY);
-        localStorage.removeItem(LEGACY_SCHEMA_VERSION_KEY);
-        setAccounts(legacyAccounts);
         return;
       }
 
@@ -1526,37 +1529,128 @@ export default function AccountsPayableSystem() {
           </div>
 
           <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">E-mail</label>
-              <input
-                value={loginUser}
-                onChange={(e) => setLoginUser(e.target.value)}
-                className="w-full border rounded-lg px-4 py-2"
-                placeholder="seu e-mail"
-              />
-            </div>
+            {authMessage && (
+              <div className="text-sm text-blue-700 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+                {authMessage}
+              </div>
+            )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Senha</label>
-              <input
-                type="password"
-                value={loginPass}
-                onChange={(e) => setLoginPass(e.target.value)}
-                className="w-full border rounded-lg px-4 py-2"
-                placeholder="sua senha"
-              />
-            </div>
+            {authView === "login" && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">E-mail</label>
+                  <input
+                    value={loginUser}
+                    onChange={(e) => setLoginUser(e.target.value)}
+                    className="w-full border rounded-lg px-4 py-2"
+                    placeholder="seu e-mail"
+                  />
+                </div>
 
-            <button
-              onClick={doLogin}
-              className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium shadow-md transition"
-            >
-              Entrar
-            </button>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Senha</label>
+                  <input
+                    type="password"
+                    value={loginPass}
+                    onChange={(e) => setLoginPass(e.target.value)}
+                    className="w-full border rounded-lg px-4 py-2"
+                    placeholder="sua senha"
+                  />
+                </div>
 
-            <p className="text-xs text-gray-500 text-center">
-              Dica: após entrar, o sistema lembra o acesso neste navegador.
-            </p>
+                <button
+                  onClick={doLogin}
+                  className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium shadow-md transition"
+                >
+                  Entrar
+                </button>
+
+                <button
+                  onClick={() => {
+                    setAuthView("reset-request");
+                    setResetEmail(loginUser.trim());
+                    setAuthMessage("");
+                  }}
+                  className="w-full text-sm text-blue-700 hover:text-blue-800"
+                >
+                  Esqueci minha senha
+                </button>
+              </>
+            )}
+
+            {authView === "reset-request" && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">E-mail</label>
+                  <input
+                    value={resetEmail}
+                    onChange={(e) => setResetEmail(e.target.value)}
+                    className="w-full border rounded-lg px-4 py-2"
+                    placeholder="seu e-mail"
+                  />
+                </div>
+
+                <button
+                  onClick={requestPasswordReset}
+                  className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium shadow-md transition"
+                >
+                  Enviar link de recuperacao
+                </button>
+
+                <button
+                  onClick={() => {
+                    setAuthView("login");
+                    setAuthMessage("");
+                  }}
+                  className="w-full text-sm text-gray-600 hover:text-gray-800"
+                >
+                  Voltar ao login
+                </button>
+              </>
+            )}
+
+            {authView === "reset-update" && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Nova senha</label>
+                  <input
+                    type="password"
+                    value={resetPass}
+                    onChange={(e) => setResetPass(e.target.value)}
+                    className="w-full border rounded-lg px-4 py-2"
+                    placeholder="minimo 6 caracteres"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Confirmar senha</label>
+                  <input
+                    type="password"
+                    value={resetPassConfirm}
+                    onChange={(e) => setResetPassConfirm(e.target.value)}
+                    className="w-full border rounded-lg px-4 py-2"
+                    placeholder="repita a senha"
+                  />
+                </div>
+
+                <button
+                  onClick={updatePassword}
+                  className="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 font-medium shadow-md transition"
+                >
+                  Atualizar senha
+                </button>
+
+                <button
+                  onClick={() => {
+                    setAuthView("login");
+                    setAuthMessage("");
+                  }}
+                  className="w-full text-sm text-gray-600 hover:text-gray-800"
+                >
+                  Voltar ao login
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -3010,5 +3104,6 @@ export default function AccountsPayableSystem() {
     </div>
   );
 }
+
 
 
