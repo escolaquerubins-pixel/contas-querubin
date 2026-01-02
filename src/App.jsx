@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import logoQuerubins from "./assets/logo-querubins.png";
+import { supabase } from "./supabaseClient";
 
 /**
  * =========================
@@ -29,22 +30,21 @@ const COMPANY_CNPJ = "CNPJ: 05.210.023/0001/44";
 
 /**
  * =========================
- * LOGIN (local, simples)
+ * LOGIN (SUPABASE AUTH)
  * =========================
  */
-const SYSTEM_USER = "admin";
-const SYSTEM_PASSWORD = "querubins@2025";
-const AUTH_KEY = "cq-auth";
 
 /**
  * =========================
- * STORAGE KEYS
+ * STORAGE (SUPABASE + LEGACY)
  * =========================
  */
-const STORAGE_KEY = "accounts-payable-data";
-const DRE_STORAGE_KEY = "cq-dre-config";
-const SCHEMA_VERSION_KEY = "cq-schema-version";
-const CURRENT_SCHEMA_VERSION = 2;
+const SUPABASE_ACCOUNTS_TABLE = "accounts_payable";
+const SUPABASE_DRE_TABLE = "dre_configs";
+const SUPABASE_DRE_ID = 1;
+const LEGACY_STORAGE_KEY = "accounts-payable-data";
+const LEGACY_DRE_STORAGE_KEY = "cq-dre-config";
+const LEGACY_SCHEMA_VERSION_KEY = "cq-schema-version";
 
 /**
  * =========================
@@ -228,6 +228,79 @@ function migrateAccountsIfNeeded(rawAccounts) {
   });
 }
 
+function mapAccountToDb(acc) {
+  return {
+    id: acc.id,
+    description: acc.description || "",
+    group_dre: acc.groupDre || acc.group || "",
+    subgroup: acc.subgroup || acc.subCategory || "",
+    cta: acc.cta || acc.account || "",
+    person_supplier: acc.personSupplier || acc.supplier || "",
+    due_date: acc.dueDate || null,
+    amount: typeof acc.amount === "number" ? acc.amount : parseMoneyBR(acc.amount),
+    payment_method: acc.paymentMethod || "",
+    bank: acc.bank || "",
+    obs: acc.obs || "",
+    expense_type: acc.expenseType || "fixa",
+    recurring: acc.recurring || "nao",
+    payment_date: acc.paymentDate || null,
+    payment_obs: acc.paymentObs || "",
+    created_at: acc.createdAt || new Date().toISOString(),
+    updated_at: acc.updatedAt || new Date().toISOString(),
+  };
+}
+
+function mapDbToAccount(row) {
+  return {
+    id: row.id,
+    description: row.description || "",
+    groupDre: row.group_dre || "",
+    subgroup: row.subgroup || "",
+    cta: row.cta || "",
+    personSupplier: row.person_supplier || "",
+    dueDate: row.due_date || "",
+    amount: Number(row.amount || 0),
+    paymentMethod: row.payment_method || "",
+    bank: row.bank || "",
+    obs: row.obs || "",
+    expenseType: row.expense_type || "fixa",
+    recurring: row.recurring || "nao",
+    paymentDate: row.payment_date || "",
+    paymentObs: row.payment_obs || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    // compat
+    group: row.group_dre || "",
+    subCategory: row.subgroup || "",
+    account: row.cta || "",
+    supplier: row.person_supplier || "",
+  };
+}
+
+function readLegacyAccounts() {
+  try {
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return migrateAccountsIfNeeded(parsed);
+  } catch (e) {
+    console.error("Erro ao ler contas locais:", e);
+    return [];
+  }
+}
+
+function readLegacyDreConfig() {
+  try {
+    const raw = localStorage.getItem(LEGACY_DRE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (e) {
+    console.error("Erro ao ler DRE local:", e);
+    return null;
+  }
+}
+
 export default function AccountsPayableSystem() {
   const confirmAction = (msg) => window.confirm(msg);
 
@@ -263,23 +336,51 @@ export default function AccountsPayableSystem() {
   const [loginPass, setLoginPass] = useState("");
 
   useEffect(() => {
-    const ok = localStorage.getItem(AUTH_KEY) === "ok";
-    if (ok) setIsAuthed(true);
+    let mounted = true;
+    const initAuth = async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (!mounted) return;
+      if (error) {
+        console.error("Erro ao obter sessão:", error);
+        setIsAuthed(false);
+        return;
+      }
+      setIsAuthed(Boolean(data.session));
+    };
+
+    void initAuth();
+
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsAuthed(Boolean(session));
+    });
+
+    return () => {
+      mounted = false;
+      subscription?.subscription?.unsubscribe();
+    };
   }, []);
 
-  const doLogin = () => {
-    if (loginUser === SYSTEM_USER && loginPass === SYSTEM_PASSWORD) {
-      setIsAuthed(true);
-      localStorage.setItem(AUTH_KEY, "ok");
-    } else {
-      alert("Usuário ou senha inválidos.");
+  const doLogin = async () => {
+    const email = loginUser.trim();
+    const password = loginPass;
+    if (!email || !password) {
+      alert("Informe e-mail e senha.");
+      return;
     }
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      alert("Usuário ou senha inválidos.");
+      return;
+    }
+    setLoginPass("");
   };
 
-  const doLogout = () => {
+  const doLogout = async () => {
     if (!confirmAction("Confirmar saída do sistema?")) return;
+    const { error } = await supabase.auth.signOut();
+    if (error) console.error("Erro ao sair:", error);
     setIsAuthed(false);
-    localStorage.removeItem(AUTH_KEY);
     setLoginUser("");
     setLoginPass("");
   };
@@ -289,32 +390,51 @@ export default function AccountsPayableSystem() {
    */
   const [dreConfig, setDreConfig] = useState(deepClone(DEFAULT_DRE));
 
-  const loadDreConfig = () => {
+  const loadDreConfig = async () => {
     try {
-      const raw = localStorage.getItem(DRE_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === "object") {
-          setDreConfig(parsed);
-          return;
-        }
+      const { data, error } = await supabase
+        .from(SUPABASE_DRE_TABLE)
+        .select("config")
+        .eq("id", SUPABASE_DRE_ID)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (data?.config) {
+        setDreConfig(mergeDre(DEFAULT_DRE, data.config));
+        return;
       }
-      setDreConfig(deepClone(DEFAULT_DRE));
-    } catch {
+
+      const legacyConfig = readLegacyDreConfig();
+      const nextConfig = legacyConfig ? mergeDre(DEFAULT_DRE, legacyConfig) : deepClone(DEFAULT_DRE);
+
+      const { error: upsertError } = await supabase
+        .from(SUPABASE_DRE_TABLE)
+        .upsert({ id: SUPABASE_DRE_ID, config: nextConfig, updated_at: new Date().toISOString() });
+
+      if (upsertError) throw upsertError;
+
+      localStorage.removeItem(LEGACY_DRE_STORAGE_KEY);
+      setDreConfig(nextConfig);
+    } catch (e) {
+      console.error("Erro ao carregar DRE:", e);
       setDreConfig(deepClone(DEFAULT_DRE));
     }
   };
 
-  const saveDreConfig = (next) => {
+  const saveDreConfig = async (next) => {
     try {
-      localStorage.setItem(DRE_STORAGE_KEY, JSON.stringify(next));
+      const { error } = await supabase
+        .from(SUPABASE_DRE_TABLE)
+        .upsert({ id: SUPABASE_DRE_ID, config: next, updated_at: new Date().toISOString() });
+      if (error) throw error;
     } catch (e) {
       console.error("Erro ao salvar DRE:", e);
     }
   };
 
   useEffect(() => {
-    loadDreConfig();
+    void loadDreConfig();
   }, []);
 
   /**
@@ -322,38 +442,56 @@ export default function AccountsPayableSystem() {
    */
   const [accounts, setAccounts] = useState([]);
 
-  const loadData = () => {
+  const loadData = async () => {
     try {
-      const schemaVer = Number(localStorage.getItem(SCHEMA_VERSION_KEY) || "0");
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        setAccounts([]);
+      const { data, error } = await supabase
+        .from(SUPABASE_ACCOUNTS_TABLE)
+        .select("*")
+        .order("due_date", { ascending: true });
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        setAccounts(data.map(mapDbToAccount));
         return;
       }
-      const parsed = JSON.parse(raw);
-      const migrated = migrateAccountsIfNeeded(parsed);
 
-      if (schemaVer !== CURRENT_SCHEMA_VERSION) {
-        localStorage.setItem(SCHEMA_VERSION_KEY, String(CURRENT_SCHEMA_VERSION));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+      const legacyAccounts = readLegacyAccounts();
+      if (legacyAccounts.length > 0) {
+        const payload = legacyAccounts.map((acc) => mapAccountToDb(acc));
+        const { error: upsertError } = await supabase
+          .from(SUPABASE_ACCOUNTS_TABLE)
+          .upsert(payload, { onConflict: "id" });
+
+        if (upsertError) throw upsertError;
+
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+        localStorage.removeItem(LEGACY_SCHEMA_VERSION_KEY);
+        setAccounts(legacyAccounts);
+        return;
       }
 
-      setAccounts(migrated);
-    } catch {
+      setAccounts([]);
+    } catch (e) {
+      console.error("Erro ao carregar contas:", e);
       setAccounts([]);
     }
   };
 
-  const saveData = (data) => {
+  const saveData = async (data) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      const payload = data.map((acc) => mapAccountToDb(acc));
+      const { error } = await supabase
+        .from(SUPABASE_ACCOUNTS_TABLE)
+        .upsert(payload, { onConflict: "id" });
+      if (error) throw error;
     } catch (e) {
       console.error("Erro ao salvar:", e);
     }
   };
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, []);
 
   /**
@@ -647,11 +785,17 @@ export default function AccountsPayableSystem() {
     closeForm();
   };
 
-  const deleteAccount = (id) => {
-    if (!confirmAction("Confirma a exclusão desta conta?")) return;
+  const deleteAccount = async (id) => {
+    if (!confirmAction("Confirma a exclus??o desta conta?")) return;
     const newAccounts = accounts.filter((a) => a.id !== id);
     setAccounts(newAccounts);
-    saveData(newAccounts);
+    try {
+      const { error } = await supabase.from(SUPABASE_ACCOUNTS_TABLE).delete().eq("id", id);
+      if (error) throw error;
+    } catch (e) {
+      console.error("Erro ao excluir:", e);
+    }
+    void saveData(newAccounts);
   };
 
   /**
@@ -1383,12 +1527,12 @@ export default function AccountsPayableSystem() {
 
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Usuário</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">E-mail</label>
               <input
                 value={loginUser}
                 onChange={(e) => setLoginUser(e.target.value)}
                 className="w-full border rounded-lg px-4 py-2"
-                placeholder="admin"
+                placeholder="seu e-mail"
               />
             </div>
 
@@ -1432,7 +1576,7 @@ export default function AccountsPayableSystem() {
               <img src={logoQuerubins} alt="Colégio Querubin's" className="h-16 w-16 object-contain" />
               <div>
                 <h1 className="text-2xl font-bold text-blue-600">Colégio Querubin's</h1>
-                <p className="text-sm text-gray-600">Sistema de Contas a Pagar da Jane</p>
+                <p className="text-sm text-gray-600">Sistema de Contas a Pagar</p>
               </div>
             </div>
 
@@ -2866,3 +3010,5 @@ export default function AccountsPayableSystem() {
     </div>
   );
 }
+
+
